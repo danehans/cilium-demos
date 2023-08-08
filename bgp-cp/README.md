@@ -1,14 +1,22 @@
-# WIP: BGP Control Plane
+# BGP Control Plane
 
 This is a demonstration of using Cilium BGP Control Plane (BGP CP) to advertise
-routes to an external BGP speaking router. Each cluster advertises a service
-using BGP CP and LB IPAM Pools.
+routes to an external BGP speaking router. Each cluster does the following:
+
+1. Runs 2 nginx pods managed as a deployment.
+2. Exposes the nginx pods as a service.
+3. Uses a Cilium IP pool to assign an external IP to services.
+4. Advertises the nginx service using BGP CP.
+
+### Demo Topology
+
+<img src="../images/cilium-bgp-demo.svg">
 
 ## Dependencies
-1. kubectl
-2. kind
-3. helm
-4. cilium-cli
+1. [kubectl](https://kubernetes.io/docs/tasks/tools/)
+2. [kind](https://kind.sigs.k8s.io/)
+3. [helm](https://helm.sh/docs/intro/install/)
+4. [cilium-cli](https://github.com/cilium/cilium-cli)
 
 ## Install the Kubernetes clusters
 
@@ -30,6 +38,9 @@ nodes:
 - role: worker
 EOF
 ```
+
+__Note:__ Two worker nodes are used so each pod in the nginx deployment
+is scheduld to a separate node.
 
 Create a Docker network that will be used for the second cluster:
 
@@ -66,13 +77,16 @@ nodes:
 EOF
 ```
 
-You now have two k8s clusters on seperate networks that are unable to communicate with each other.
+You now have two k8s clusters on seperate networks that are unable to communicate
+with each other (until the external BGP router is setup).
 
 ## Install Cilium in the clusters
 
 Install Cilium v1.14 in the second cluster. Kind should have the kubectl context set for the
 `kind-cilium2` context. Use the `kubectl config use-context` command throughout this guide to
 change between `kind-cilium` and `kind-cilium2` contexts, e.g. `cilium` and `cilium2` clusters.
+
+__Note:__ Use the `install` subcommand instead of `upgrade` if this is your first Cilium install.
 
 ```sh
 $ helm upgrade --kube-context kind-cilium2 --install cilium cilium/cilium --namespace kube-system --version 1.14.0 --values - <<EOF
@@ -122,6 +136,8 @@ Image versions         cilium             quay.io/cilium/cilium:v1.14.0@sha256:5
 
 Install Cilium v1.14 in the first cluster:
 
+__Note:__ Use the `install` subcommand instead of `upgrade` if this is your first Cilium install.
+
 ```sh
 $ helm upgrade --kube-context kind-cilium --install cilium cilium/cilium --namespace kube-system --version 1.14.0 --values - <<EOF
 kubeProxyReplacement: strict
@@ -168,14 +184,13 @@ Image versions         cilium             quay.io/cilium/cilium:v1.14.0@sha256:5
                        cilium-operator    quay.io/cilium/operator-generic:v1.14.0@sha256:3014d4bcb8352f0ddef90fa3b5eb1bbf179b91024813a90a0066eb4517ba93c9: 2
 ```
 
-## [TODO] Setup the external BGP Router
+## Run the External BGP Router
 
-Provide steps for running Bird as a container that attaches to each network, peers
-with the Cilium BGP routers and advertises routes between clusters.
+[Bird](https://bird.network.cz/) is used as an external router in the demo and peers with the Cilium BGP routers in each cluster.
 
-Update the IPs in the the `bird.conf` file to match the node IP's in your clusters.
+Update the IPs in the the `bird.conf` file to match the node IP's in your clusters. Use `kubectl --context kind-cilium|kind-cilium2 get nodes -o wide` to get the node IP's used for the BGP configuration.
 
-Run the Bird BGP router:
+Run the Bird container:
 
 ```sh
 docker run --name bird-router \
@@ -185,7 +200,7 @@ docker run --name bird-router \
 -d bird-container
 ```
 
-Attach the router to the network of the secon cluster:
+Attach the Bird router to the second cluster's network:
 
 ```sh
 docker network connect kind2 bird-router
@@ -193,7 +208,7 @@ docker network connect kind2 bird-router
 
 ## Run Sample Apps
 
-Run NGINX in the first cluster to test network connectivity. If needed, set the kubectl:
+Run nginx in the first cluster:
 
 ```sh
 $ kubectl --context kind-cilium apply -f - <<EOF
@@ -219,7 +234,7 @@ spec:
 EOF
 ```
 
-Wait for the NGINX deployment to be ready:
+Wait for the nginx deployment to be ready:
 
 ```sh
 $ kubectl --context kind-cilium wait --timeout=2m deployment/nginx --for=condition=Available
@@ -227,7 +242,7 @@ $ kubectl --context kind-cilium wait --timeout=2m deployment/nginx --for=conditi
 deployment.apps/nginx condition met
 ```
 
-Get the IPs of the NGINX pods:
+Get the IPs of the nginx pods:
 
 ```sh
 $ kubectl --context kind-cilium get po -o wide
@@ -242,7 +257,7 @@ $ kubectl --context kind-cilium exec po/nginx-ff6774dc6-rnw9n -- curl -s -o /dev
 200
 ```
 
-Run NGINX in the second cluster to test network connectivity:
+Run nginx in the second cluster:
 
 ```sh
 $ kubectl --context kind-cilium2 apply -f - <<EOF
@@ -268,7 +283,7 @@ spec:
 EOF
 ```
 
-Wait for the NGINX deployment to be ready:
+Wait for the nginx deployment to be ready:
 
 ```sh
 $ kubectl --context kind-cilium2 wait --timeout=2m deployment/nginx --for=condition=Available
@@ -276,7 +291,7 @@ $ kubectl --context kind-cilium2 wait --timeout=2m deployment/nginx --for=condit
 deployment.apps/nginx condition met
 ```
 
-Get the IPs of the NGINX pods:
+Get the IPs of the nginx pods:
 
 ```sh
 $ kubectl --context kind-cilium2 get po -o wide
@@ -292,17 +307,18 @@ $ kubectl --context kind-cilium2 exec po/nginx-65df995dc8-n8rwf -- curl -s -o /d
 200
 ```
 
-Intracluster connectivity has now been successfully verified.
+Connectivity within each cluster has been successfully verified and you can now
+proceed to the next section.
 
-Expose the NGINX deployment for each cluster using a load balancer service. First create the IPAM
-pool used to assign addresses to load balancer services:
+Expose the nginx deployment for each cluster using a load balancer service. First
+create the IPAM pool used to assign addresses to load balancer services:
 
 ```sh
 kubectl --context kind-cilium apply -f - <<EOF
 apiVersion: "cilium.io/v2alpha1"
 kind: CiliumLoadBalancerIPPool
 metadata:
-  name: "test"
+  name: demo
 spec:
   cidrs:
   - cidr: "10.11.0.0/16"
@@ -316,7 +332,7 @@ kubectl --context kind-cilium2 apply -f - <<EOF
 apiVersion: "cilium.io/v2alpha1"
 kind: CiliumLoadBalancerIPPool
 metadata:
-  name: "test"
+  name: demo
 spec:
   cidrs:
   - cidr: "10.12.0.0/16"
@@ -379,16 +395,6 @@ __Note:__ In typical deployments, BGP will not run on control-plane nodes since 
 Since each cluster is under separate administration in this demo, a different autonomous system (AS) numbers
 are used, `65100` and `65200` respectivly.
 
-Get the node IPs of the second cluster that will be used for the BGP peering policy of the first cluster:
-
-```sh
-$ kubectl --context kind-cilium2 get nodes -o wide
-NAME                    STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE             KERNEL-VERSION      CONTAINER-RUNTIME
-cilium2-control-plane   Ready    control-plane   93m   v1.25.3   172.18.0.7    <none>        Ubuntu 22.04.1 LTS   5.10.124-linuxkit   containerd://1.6.9
-cilium2-worker          Ready    <none>          93m   v1.25.3   172.18.0.6    <none>        Ubuntu 22.04.1 LTS   5.10.124-linuxkit   containerd://1.6.9
-cilium2-worker2         Ready    <none>          93m   v1.25.3   172.18.0.5    <none>        Ubuntu 22.04.1 LTS   5.10.124-linuxkit   containerd://1.6.9
-```
-
 Apply a BGP peering policy to the first cluster:
 
 ```sh
@@ -405,7 +411,7 @@ spec:
     - localASN: 65100
       neighbors:
         - peerASN: 65000
-          peerAddress: 172.22.0.5/32
+          peerAddress: 172.22.0.5/32 # eth0 IP of Bird router
       serviceSelector:
         matchLabels:
           app: nginx
@@ -428,11 +434,71 @@ spec:
     - localASN: 65200
       neighbors:
         - peerASN: 65000
-          peerAddress: 172.25.0.5/32
+          peerAddress: 172.25.0.5/32 # eth1 IP of Bird router
       serviceSelector:
         matchLabels:
           app: nginx
 EOF
+```
+
+# Verification
+
+Verify the BGP speakers for the first cluster are established with
+the Bird router:
+
+```sh
+$ cilium --context kind-cilium bgp peers
+Node                   Local AS   Peer AS   Peer Address   Session State   Uptime   Family         Received   Advertised
+cilium-control-plane   65100      65000     172.22.0.5     established     2m43s    ipv4/unicast   4          1
+                                                                                    ipv6/unicast   0          0
+cilium-worker          65100      65000     172.22.0.5     established     2m44s    ipv4/unicast   4          1
+                                                                                    ipv6/unicast   0          0
+cilium-worker2         65100      65000     172.22.0.5     established     2m44s    ipv4/unicast   3          1
+                                                                                    ipv6/unicast   0          0
+```
+
+Do the same for the second cluster:
+
+```sh
+cilium --context kind-cilium2 bgp peers
+Node                    Local AS   Peer AS   Peer Address   Session State   Uptime   Family         Received   Advertised
+cilium2-control-plane   65200      65000     172.25.0.5     established     2m53s    ipv4/unicast   4          1
+                                                                                     ipv6/unicast   0          0
+cilium2-worker          65200      65000     172.25.0.5     established     2m50s    ipv4/unicast   3          1
+                                                                                     ipv6/unicast   0          0
+cilium2-worker2         65200      65000     172.25.0.5     established     2m50s    ipv4/unicast   4          1
+                                                                                     ipv6/unicast   0          0
+```
+
+Exec into the Bird container:
+
+```sh
+docker exec -it bird-router sh
+```
+
+Verify the routing table has been updated:
+
+```sh
+# ip route
+default via 172.22.0.1 dev eth3
+10.11.146.104 via 172.22.0.2 dev eth3 proto bird
+10.12.3.49 via 172.25.0.2 dev eth1 proto bird
+172.22.0.0/16 dev eth3 proto kernel scope link src 172.22.0.5
+172.25.0.0/16 dev eth1 proto kernel scope link src 172.25.0.5
+```
+
+Test connectivity to the nginx service of the first cluster:
+
+```sh
+# curl -s -o /dev/null -w "%{http_code}" http://10.11.146.104
+200
+```
+
+And for the second cluster:
+
+```sh
+# curl -s -o /dev/null -w "%{http_code}" http://10.12.3.49
+200
 ```
 
 [docs]: https://docs.cilium.io/en/v1.14/network/bgp-control-plane/
