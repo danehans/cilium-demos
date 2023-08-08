@@ -1,7 +1,8 @@
 # BGP Control Plane
 
 This is a demonstration of using Cilium BGP Control Plane (BGP CP) to advertise
-routes to an external BGP speaking router. Each cluster does the following:
+routes to an external BGP speaking router and route between two clusters. Each
+cluster does the following:
 
 1. Runs 2 nginx pods managed as a deployment.
 2. Exposes the nginx pods as a service.
@@ -17,6 +18,7 @@ routes to an external BGP speaking router. Each cluster does the following:
 2. [kind](https://kind.sigs.k8s.io/)
 3. [helm](https://helm.sh/docs/intro/install/)
 4. [cilium-cli](https://github.com/cilium/cilium-cli)
+5. `git clone https://github.com/danehans/cilium-demos.git && cd cilium-demos/bgp-cp`
 
 ## Install the Kubernetes clusters
 
@@ -42,7 +44,7 @@ EOF
 __Note:__ Two worker nodes are used so each pod in the nginx deployment
 is scheduld to a separate node.
 
-Create a Docker network that will be used for the second cluster:
+Create a Docker network used for the second cluster:
 
 ```sh
 docker network create -d=bridge \
@@ -77,8 +79,14 @@ nodes:
 EOF
 ```
 
+Remove the env var so future kind cluster installs use the default `kind` Docker network.
+
+```sh
+unset KIND_EXPERIMENTAL_DOCKER_NETWORK
+```
+
 You now have two k8s clusters on seperate networks that are unable to communicate
-with each other (until the external BGP router is setup).
+with each other for the time being.
 
 ## Install Cilium in the clusters
 
@@ -86,7 +94,8 @@ Install Cilium v1.14 in the second cluster. Kind should have the kubectl context
 `kind-cilium2` context. Use the `kubectl config use-context` command throughout this guide to
 change between `kind-cilium` and `kind-cilium2` contexts, e.g. `cilium` and `cilium2` clusters.
 
-__Note:__ Use the `install` subcommand instead of `upgrade` if this is your first Cilium install.
+__Note:__ Use the `install` subcommand instead of `upgrade` if this is the first time installing
+Cilium using Helm.
 
 ```sh
 $ helm upgrade --kube-context kind-cilium2 --install cilium cilium/cilium --namespace kube-system --version 1.14.0 --values - <<EOF
@@ -106,7 +115,7 @@ image:
 ipam:
   mode: kubernetes
 tunnel: disabled
-ipv4NativeRoutingCIDR: 10.12.0.0/16
+ipv4NativeRoutingCIDR: 10.11.0.0/16
 bgpControlPlane:
   enabled: true
 autoDirectNodeRoutes: true
@@ -156,7 +165,7 @@ image:
 ipam:
   mode: kubernetes
 tunnel: disabled
-ipv4NativeRoutingCIDR: 10.11.0.0/16
+ipv4NativeRoutingCIDR: 10.12.0.0/16
 bgpControlPlane:
   enabled: true
 autoDirectNodeRoutes: true
@@ -186,9 +195,18 @@ Image versions         cilium             quay.io/cilium/cilium:v1.14.0@sha256:5
 
 ## Run the External BGP Router
 
-[Bird](https://bird.network.cz/) is used as an external router in the demo and peers with the Cilium BGP routers in each cluster.
+[Bird](https://bird.network.cz/) is used as an external router and peers with the
+Cilium BGP routers in each cluster.
 
-Update the IPs in the the `bird.conf` file to match the node IP's in your clusters. Use `kubectl --context kind-cilium|kind-cilium2 get nodes -o wide` to get the node IP's used for the BGP configuration.
+Build the bird image:
+
+```sh
+docker build -t bird-container .
+```
+
+If needed, update the IPs in the the `bird.conf` file to match the node IP's in the
+first cluster. Use `kubectl --context kind-cilium get nodes -o wide` to get the node
+IP's used for the BGP configuration.
 
 Run the Bird container:
 
@@ -205,6 +223,38 @@ Attach the Bird router to the second cluster's network:
 ```sh
 docker network connect kind2 bird-router
 ```
+
+If needed, update the IPs in the the `bird.conf` file to match the node IP's in the
+second cluster. Use `kubectl --context kind-cilium2 get nodes -o wide` to get the node
+IP's used for the BGP configuration.
+
+Have Bird read the updated configuration. First, exec into the Bird container:
+
+```sh
+docker exec -it bird-router sh
+```
+
+Reload the Bird configuration:
+
+```sh
+birdc configure
+```
+
+Verify the network interface configuration and routing table:
+
+```sh
+$ ip addr list
+$ ip route
+```
+
+Verify the BGP configuration. Note that the configured peers will not be "ESTABLISHED" until
+Cilium BGP CP is configured for both clusters.
+
+```sh
+$ birdc show protocols all
+```
+
+You can now exit the Bird container.
 
 ## Run Sample Apps
 
@@ -344,8 +394,8 @@ kubectl --context kind-cilium expose deployment nginx --type=LoadBalancer --port
 kubectl --context kind-cilium2 expose deployment nginx --type=LoadBalancer --port=80 --labels app=nginx
 ```
 
-The nginx service for each cluster should have an external IP assigned from the IPAM pool.
-Check the external IP for the nginx service in the first cluster:
+The nginx service for each cluster should have an external IP assigned from
+the IPAM pool. Check the external IP for the nginx service in the first cluster:
 
 ```sh
 $ kubectl --context kind-cilium get svc/nginx
@@ -361,15 +411,15 @@ NAME    TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)        AGE
 nginx   LoadBalancer   10.12.153.124   10.12.141.231   80:30596/TCP   9m40s
 ```
 
-The external IPs will be advertised by BGP in upcoming steps to provide intra-cluster connectivity
-between services.
+The external IPs will be advertised by BGP in upcoming steps to provide
+external/inter-cluster connectivity of load balancer services.
 
 ## Configure BGP
 
-The Cilium BGP configuration is a two part process, annotate the nodes that will run BGP and configure
-a peering policy to configure BGP peers, advertise routes, etc. Refer to the [official docs][docs] for
-additional details regarding BGP Control Plane.
-
+The Cilium BGP configuration is a two part process, annotate the nodes that
+will run BGP and configure a peering policy to configure BGP peers, advertise
+routes, etc. Refer to the [official docs][docs] for additional details regarding
+BGP Control Plane.
 
 Annotate the nodes in the first cluster:
 
@@ -379,8 +429,8 @@ kubectl --context kind-cilium annotate node/cilium-worker cilium.io/bgp-virtual-
 kubectl --context kind-cilium annotate node/cilium-worker2 cilium.io/bgp-virtual-router.65100="local-port=179"
 ```
 
-By default Cilium will instantiate each virtual router without a listening port uless the `local-port`
-annotation is set.
+By default Cilium will instantiate each virtual router without a listening port
+unless the `local-port` annotation is set.
 
 Annotate the nodes in the second cluster:
 
@@ -390,10 +440,11 @@ kubectl --context kind-cilium2 annotate node/cilium2-worker cilium.io/bgp-virtua
 kubectl --context kind-cilium2 annotate node/cilium2-worker2 cilium.io/bgp-virtual-router.65200="local-port=179"
 ```
 
-__Note:__ In typical deployments, BGP will not run on control-plane nodes since they do not run workload pods.
+__Note:__ In typical deployments, BGP CP will not run on control-plane nodes
+since they do not run workload pods.
 
-Since each cluster is under separate administration in this demo, a different autonomous system (AS) numbers
-are used, `65100` and `65200` respectivly.
+Since each cluster is under separate administration in this demo, a different
+autonomous system (AS) numbers are used, `65100` and `65200` respectivly.
 
 Apply a BGP peering policy to the first cluster:
 
@@ -408,7 +459,8 @@ spec:
     matchLabels:
       kubernetes.io/os: linux
   virtualRouters:
-    - localASN: 65100
+    - exportPodCIDR: true
+      localASN: 65100
       neighbors:
         - peerASN: 65000
           peerAddress: 172.22.0.5/32 # eth0 IP of Bird router
@@ -431,7 +483,8 @@ spec:
     matchLabels:
       kubernetes.io/os: linux
   virtualRouters:
-    - localASN: 65200
+    - exportPodCIDR: true
+      localASN: 65200
       neighbors:
         - peerASN: 65000
           peerAddress: 172.25.0.5/32 # eth1 IP of Bird router
@@ -441,10 +494,40 @@ spec:
 EOF
 ```
 
+__Note__: The `exportPodCIDR` field is set so nodes advertise Pod CIDRs.
+This will allow the the external Bird router to route response traffic
+back to the cURL client.
+
+Since BGP CP does not add routes to the data path, i.e. local node routing table,
+you must create static routes on nodes to the Service and Pod CIDRs of the opposing
+cluster.
+
+Add static routes in the first cluster. Use `kubectl --context kind-cilium get po -n kube-system | grep cilium`
+if you need the container name of Cilium pods:
+
+```sh
+kubectl --context kind-cilium exec po/cilium-4mjrm -n kube-system -- ip route add 10.12.0.0/16 via 172.22.0.5
+kubectl --context kind-cilium exec po/cilium-4mjrm -n kube-system -- ip route add 10.242.0.0/16 via 172.22.0.5
+kubectl --context kind-cilium exec po/cilium-jlj4x -n kube-system -- ip route add 10.12.0.0/16 via 172.22.0.5
+kubectl --context kind-cilium exec po/cilium-jlj4x -n kube-system -- ip route add 10.242.0.0/16 via 172.22.0.5
+kubectl --context kind-cilium exec po/cilium-xll65 -n kube-system -- ip route add 10.12.0.0/16 via 172.22.0.5
+kubectl --context kind-cilium exec po/cilium-xll65 -n kube-system -- ip route add 10.242.0.0/16 via 172.22.0.5
+```
+
+Do the same for the second cluster:
+
+```sh
+kubectl --context kind-cilium exec po/cilium-7mn49 -n kube-system -- ip route add 10.11.0.0/16 via 172.25.0.5
+kubectl --context kind-cilium exec po/cilium-7mn49 -n kube-system -- ip route add 10.241.0.0/16 via 172.25.0.5
+kubectl --context kind-cilium exec po/cilium-fx98s -n kube-system -- ip route add 10.11.0.0/16 via 172.25.0.5
+kubectl --context kind-cilium exec po/cilium-fx98s -n kube-system -- ip route add 10.241.0.0/16 via 172.25.0.5
+kubectl --context kind-cilium exec po/cilium-hvh7j -n kube-system -- ip route add 10.11.0.0/16 via 172.25.0.5
+kubectl --context kind-cilium exec po/cilium-hvh7j -n kube-system -- ip route add 10.241.0.0/16 via 172.25.0.5
+```
+
 # Verification
 
-Verify the BGP speakers for the first cluster are established with
-the Bird router:
+Verify the BGP speakers for the first cluster are established with the Bird router:
 
 ```sh
 $ cilium --context kind-cilium bgp peers
@@ -485,6 +568,7 @@ default via 172.22.0.1 dev eth3
 10.12.3.49 via 172.25.0.2 dev eth1 proto bird
 172.22.0.0/16 dev eth3 proto kernel scope link src 172.22.0.5
 172.25.0.0/16 dev eth1 proto kernel scope link src 172.25.0.5
+...
 ```
 
 Test connectivity to the nginx service of the first cluster:
@@ -500,5 +584,34 @@ And for the second cluster:
 # curl -s -o /dev/null -w "%{http_code}" http://10.12.3.49
 200
 ```
+
+Exit the Bird container and test connectivity between clusters. Get the
+IP of the nginx service in the second cluster:
+
+```sh
+$ kubectl --context kind-cilium2 get svc/nginx
+NAME    TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)        AGE
+nginx   LoadBalancer   10.12.195.176   10.12.103.239   80:31294/TCP   25h
+```
+
+Get the pod name of the cURL client (nginx pod) in the first cluster:
+
+```sh
+$ kubectl --context kind-cilium get po -o wide
+NAME                    READY   STATUS    RESTARTS   AGE   IP             NODE             NOMINATED NODE   READINESS GATES
+nginx-ff6774dc6-rnw9n   1/1     Running   0          28h   10.241.2.140   cilium-worker    <none>           <none>
+nginx-ff6774dc6-x9ct9   1/1     Running   0          28h   10.241.1.188   cilium-worker2   <none>           <none>
+```
+
+Use cURL to test connectivty between the two:
+
+```sh
+$ kubectl --context kind-cilium exec po/nginx-ff6774dc6-rnw9n -- curl -s -o /dev/null -w "%{http_code}" http://10.12.103.239
+200
+```
+
+Repeat these steps to test connectivity from the second cluster to the first cluster.
+
+Congratulations, you've completed the demo!
 
 [docs]: https://docs.cilium.io/en/v1.14/network/bgp-control-plane/
