@@ -206,7 +206,8 @@ docker build -t bird-container .
 
 If needed, update the IPs in the the `bird.conf` file to match the node IP's in the
 first cluster. Use `kubectl --context kind-cilium get nodes -o wide` to get the node
-IP's used for the BGP configuration.
+IP's used for the BGP configuration. The Bird container should get assigned the next
+highest IP from the node network and should be used for the `router id`.
 
 Run the Bird container:
 
@@ -287,9 +288,7 @@ EOF
 Wait for the nginx deployment to be ready:
 
 ```sh
-$ kubectl --context kind-cilium wait --timeout=2m deployment/nginx --for=condition=Available
-
-deployment.apps/nginx condition met
+kubectl --context kind-cilium wait --timeout=2m deployment/nginx --for=condition=Available
 ```
 
 Get the IPs of the nginx pods:
@@ -336,9 +335,7 @@ EOF
 Wait for the nginx deployment to be ready:
 
 ```sh
-$ kubectl --context kind-cilium2 wait --timeout=2m deployment/nginx --for=condition=Available
-
-deployment.apps/nginx condition met
+kubectl --context kind-cilium2 wait --timeout=2m deployment/nginx --for=condition=Available
 ```
 
 Get the IPs of the nginx pods:
