@@ -214,7 +214,7 @@ Run the Bird container:
 ```sh
 docker run --name bird-router \
   --network kind \
---mount type=bind,source=$GOPATH/src/github.com/danehans/cilium-demos/bgp-cp,target=/config \
+--mount type=bind,source=$(pwd),target=/config \
 --cap-add=NET_ADMIN \
 -d bird-container
 ```
