@@ -30,6 +30,7 @@ make kind-image
 Create an install values file, `vals.yaml`, with MP IPAM, BGP, local image pull, etc. configured:
 
 ```sh
+$ cat <<EOF > vals.yaml
 ipam:
   mode: multi-pool
   operator:
@@ -63,6 +64,7 @@ operator:
     suffix: ""
     tag: local
     pullPolicy: Never
+EOF
 ```
 
 Install Cilium using the values file:
@@ -106,10 +108,7 @@ kubectl annotate node/kind-worker cilium.io/bgp-virtual-router.65200="local-port
 Get the node internal IPs used for BGP peering:
 
 ```sh
-$ kubectl get nodes -o wide
-NAME                 STATUS   ROLES           AGE    VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION      CONTAINER-RUNTIME
-kind-control-plane   Ready    control-plane   132m   v1.27.1   172.21.0.3    <none>        Debian GNU/Linux 11 (bullseye)   5.15.0-78-generic   containerd://1.6.21
-kind-worker          Ready    <none>          132m   v1.27.1   172.21.0.2    <none>        Debian GNU/Linux 11 (bullseye)   5.15.0-78-generic   containerd://1.6.21
+kubectl get nodes -o wide
 ```
 
 Set the node IP env vars:
