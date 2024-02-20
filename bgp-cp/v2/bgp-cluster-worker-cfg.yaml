@@ -1,0 +1,16 @@
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: worker
+spec:
+  nodeSelector:
+    matchLabels:
+      kubernetes.io/hostname: bgp-cplane-dev-v4-worker
+  bgpInstances:
+    - name: cp
+      localASN: 65002
+      peers:
+      - name: frr-router0
+        peerAddress: 10.0.1.1
+        peerASN: 65000
+

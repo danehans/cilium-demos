@@ -1,0 +1,13 @@
+routingMode: native
+
+bgpControlPlane:
+  enabled: true
+  v2Enabled: true
+
+ipv4NativeRoutingCIDR: 10.0.0.0/8
+
+ipam:
+  mode: kubernetes
+
+k8s:
+  requireIPv4PodCIDR: true
