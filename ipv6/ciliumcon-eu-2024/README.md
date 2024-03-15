@@ -1,26 +1,24 @@
 # Cilium IPv6 for Kubernetes
 
-This demo walks through some of the IPv6 features of Cilium.
+Cilium is at the forefront of leveraging eBPF to provide advanced networking, observability, and security. This demo will dive into how Cilium harnesses the power of eBPF to provide seamless IPv6 networking for Kubernetes clusters, offering features such as IPv6 address management, network policy enforcement, and observability.
 
-1. Create an IPv6 Kubernetes cluster
-2. Install Cilium
-3. Test IPv6 connectivity
-4. Use Hubble to observe IPv6 traffic
-5. Test Network Policy
-
-### Demo Topology
-
+The demo uses [Kind](https://kind.sigs.k8s.io/) to create a 2-node Kubernetes cluster configured for IPv6. The following diagram provides additional details of the demo environment:
 <img src="../../images/cilium-ipv6-demo.svg">
 
 ## Dependencies
+
+The following dependencies must be met for the demo to run properly:
+
 1. [kubectl](https://kubernetes.io/docs/tasks/tools/)
 2. Docker daemon with [IPv6 enabled](https://docs.cilium.io/en/stable/contributing/development/dev_setup/#optional-docker-and-ipv6)
 3. [Kind](https://kind.sigs.k8s.io/)
-4. [Cilium CLI](https://docs.cilium.io/en/latest/gettingstarted/k8s-install-default/#install-the-cilium-cli)
-5. [Hubble Client](https://docs.cilium.io/en/latest/gettingstarted/hubble_setup/#install-the-hubble-client)
-6. Clone the Cilium repo: `git clone https://github.com/cilium/cilium.git && cd cilium`
+4. [Make](https://www.gnu.org/software/make/)
+5. [jq](https://jqlang.github.io/jq/)
+6. [Cilium CLI](https://docs.cilium.io/en/latest/gettingstarted/k8s-install-default/#install-the-cilium-cli)
+7. [Hubble Client](https://docs.cilium.io/en/latest/gettingstarted/hubble_setup/#install-the-hubble-client)
+8. Clone the Cilium repo: `git clone https://github.com/cilium/cilium.git && cd cilium`
 
-## Install the Kubernetes clusters
+## Install Kubernetes
 
 Create the Kind cluster:
 
@@ -34,7 +32,7 @@ After the cluster is installed, verify the IPv6 configuration of the Kubernetes 
 kubectl get po/kube-controller-manager-kind-control-plane -n kube-system -o yaml | grep -e service-cluster -e cluster-cidr
 ```
 
-Nodes will be assigned a Pod CIDR from the `--cluster-cidr` CIDR and Services will be assigned IPs from the `--service-cluster-ip-range` CIDR.
+Nodes will be assigned a Pod CIDR from the `--cluster-cidr` CIDR and services will be assigned IPs from the `--service-cluster-ip-range` CIDR.
 
 Verify that nodes were assigned IPv6 pod CIDRs:
 
@@ -73,7 +71,11 @@ cilium install \
   --helm-set ipv6NativeRoutingCIDR=fd00:10::/32
 ```
 
-Note that the `ipv6NativeRoutingCIDR` CIDR should cover the pod and service CIDRs to ensure that traffic to those destinations are not masqueraded by Cilium agent.
+* `bpf.masquerade` tells Cilium to use eBPF for masquerading instead of iptables.
+* `kubeProxyReplacement` replaces kube-proxy with Cilium for service load balancing using eBPF instead of iptables.
+* `ipv6NativeRoutingCIDR` defines the source IP addresses that should *not* be masqueraded. The CIDR should cover the pod and service CIDRs to ensure that traffic to those destinations are not masqueraded by Cilium agent.
+* `routingMode` uses host routing instead of a tunnel overlay for node-to-node routing.
+* `autoDirectNodeRoutes` allows nodes to learn about routes to pod CIDRs of other nodes.
 
 Wait for Cilium to report a "ready" status:
 
@@ -81,12 +83,7 @@ Wait for Cilium to report a "ready" status:
 cilium status --wait
 ```
 
-Cilium is now running in the cluster.
-
-Due to `autoDirectNodeRoutes` each node has learned how to reach the podCIDR of
-other nodes.
-
-Verify the routing table of the control plane node:
+Cilium is now running in the cluster. Verify the routing table of the control plane node:
 
 ```sh
 docker exec kind-control-plane ip -6 route | grep "fd00:10:244:1::/64"
@@ -102,10 +99,10 @@ You are now ready to run workloads in the cluster.
 
 ## Run Sample Apps
 
-Run client and server workloads to use for testing IPv6 connectivity. Node selectors are used as a simple mechanism to schedule client and server pods to different nodes:
+Run client and server pods to use for testing IPv6 connectivity. Node selectors are used as a simple mechanism to schedule client and server pods to different nodes:
 
 ```sh
-$ kubectl apply -f - <<EOF
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -310,7 +307,7 @@ Apply a network policy that only allows `TCP:80` traffic to ingress the server f
 the client pod:
 
 ```sh
-$ kubectl apply -f - <<EOF
+kubectl apply -f - <<EOF
 apiVersion: "cilium.io/v2"
 kind: CiliumNetworkPolicy
 metadata:
@@ -420,6 +417,7 @@ EOF
 ```
 
 Get the IPs of the netperf client and server pods:
+
 ```sh
 $ kubectl get po -o wide
 NAME        READY   STATUS    RESTARTS   AGE    IP                    NODE                 NOMINATED NODE   READINESS GATES
@@ -464,6 +462,46 @@ Wait for Cilium to report a "ready" status:
 cilium status --wait
 ```
 
+Verify the GSO setting of the nodes have increased to 192KB:
+
+```sh
+$ for node in kind-control-plane kind-worker; do   echo "$node gso_max_size:";   docker exec $node ip -d -j link show dev eth0 | jq -c '.[0].gso_max_size'; done
+kind-control-plane gso_max_size:
+196608
+kind-worker gso_max_size:
+196608
+```
+
+Pods need to be restarted for the BIG TCP setting to take effect. Forcefully delete the netperf pods:
+
+```sh
+kubectl delete po/np-client -f
+kubectl delete po/np-server -f
+```
+
+After using the above manifests to start new netperf client and server pods, get the new IP of the `np-server` pod:
+
+```sh
+$ kubectl get po/np-server -o wide
+NAME        READY   STATUS    RESTARTS   AGE     IP                    NODE          NOMINATED NODE   READINESS GATES
+np-server   1/1     Running   0          3m21s   fd00:10:244:1::e32e   kind-worker   <none>           <none>
+```
+
+Rerun the test:
+
+```sh
+$ kubectl exec np-client -- netperf  -t TCP_RR -H fd00:10:244:1::e32e -- -r80000:80000 -O MIN_LATENCY,P90_LATENCY,P99_LATENCY,THROUGHPUT
+MIGRATED TCP REQUEST/RESPONSE TEST from ::0 (::) port 0 AF_INET6 to fd00:10:244:1::e32e () port 0 AF_INET6 : first burst 0
+Minimum      90th         99th         Throughput
+Latency      Percentile   Percentile
+Microseconds Latency      Latency
+             Microseconds Microseconds
+45           106          152          14370.36
+```
+
+Compare the numbers from the previous test and you will see that the latency and throughput increased dramatically.
+
+Congratulations on completing the demo! I hope you enjoyed your experience and improved your knowledge of Cilium. If you find any errors or areas of improvement, please submit a pull request.
+
 [Hubble]: https://docs.cilium.io/en/latest/gettingstarted/hubble_intro/
 [cnp]: https://docs.cilium.io/en/stable/network/kubernetes/policy/#ciliumnetworkpolicy
-[knp]: https://docs.cilium.io/en/stable/network/kubernetes/policy/#networkpolicy
