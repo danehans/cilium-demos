@@ -60,21 +60,19 @@ docker network inspect kind-cilium
 Install Cilium:
 
 ```sh
-cilium install \
-  --helm-set debug.enabled=true \
-  --helm-set ipv4.enabled=false \
-  --helm-set ipv6.enabled=true \
-  --helm-set routingMode=native \
-  --helm-set bpf.masquerade=true \
-  --helm-set kubeProxyReplacement=true \
-  --helm-set autoDirectNodeRoutes=true \
-  --helm-set ipv6NativeRoutingCIDR=fd00:10::/32
+cilium install --version v1.15.1 \
+  --set debug.enabled=true \
+  --set ipv4.enabled=false \
+  --set ipv6.enabled=true \
+  --set routingMode=native \
+  --set autoDirectNodeRoutes=true \
+  --set ipv6NativeRoutingCIDR=fd00:10::/32 \
+  --set bpf.masquerade=true \
+  --set kubeProxyReplacement=true
 ```
 
-* `bpf.masquerade` tells Cilium to use eBPF for masquerading instead of iptables.
-* `kubeProxyReplacement` replaces kube-proxy with Cilium for service load balancing using eBPF instead of iptables.
-* `ipv6NativeRoutingCIDR` defines the source IP addresses that should *not* be masqueraded. The CIDR should cover the pod and service CIDRs to ensure that traffic to those destinations are not masqueraded by Cilium agent.
 * `routingMode` uses host routing instead of a tunnel overlay for node-to-node routing.
+* `ipv6NativeRoutingCIDR` defines the source IP addresses that should *not* be masqueraded. The CIDR should cover the pod and service CIDRs to ensure that traffic to those destinations are not masqueraded by Cilium agent.
 * `autoDirectNodeRoutes` allows nodes to learn about routes to pod CIDRs of other nodes.
 
 Wait for Cilium to report a "ready" status:
@@ -113,6 +111,7 @@ spec:
   containers:
   - name: curl-client
     image: curlimages/curl
+    imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
     args: ["-c", "while true; do sleep 1000; done"]
   nodeSelector:
@@ -163,15 +162,32 @@ Expose the server pod using a ClusterIP service:
 kubectl expose po server --type=ClusterIP --port=80 --labels app=server
 ```
 
-Get the service's IP address:
+Review the service details:
 
 ```sh
-$ kubectl get svc/server
-NAME     TYPE        CLUSTER-IP         EXTERNAL-IP   PORT(S)   AGE
-server   ClusterIP   fd00:10:96::b611   <none>        80/TCP    7s
+$ kubectl describe svc/server
+Name:              server
+Namespace:         default
+Labels:            app=server
+Annotations:       <none>
+Selector:          app=server
+Type:              ClusterIP
+IP Family Policy:  SingleStack
+IP Families:       IPv6
+IP:                fd00:10:96::b611
+IPs:               fd00:10:96::b611
+Port:              <unset>  80/TCP
+TargetPort:        80/TCP
+Endpoints:         [fd00:10:244:1::7c58]:80
+Session Affinity:  None
+Events:            <none>
 ```
 
-Set the environment variable that will be used to represent the IPv6 address of the server pod:
+The `IP Family Policy` and `IP Families` allows the service to operate in networks that use both IPv4 and IPv6.
+
+* `IP Family Policy`: Indicates how IP families (IPv4 and IPv6) are used by this service. The SingleStack policy means the service uses only one IP family, which in our case is IPv6.
+
+* `IP Families`: Lists the IP protocol families that the service supports. In our case, IPv6 indicates that this service is configured to use only IPv6 addresses. If our cluster and service were configured to use dual-stack, you would see both IPv4 and IPv6 listed here.
 
 Test network connectivity from the client pod to the server pod through the service:
 
@@ -262,12 +278,12 @@ __Note:__ Add the `--ip-translation=false` flag to display pod IPs instead of na
 
 ## Network Policy
 
-Cilium [network policy][cnp] is a powerful and flexible way to enforce security rules and segment network traffic for containerized applications at the application and API protocol level using eBPF technology. It allows administrators to define both allow and deny rules based on Kubernetes labels, pod identities, and even Layer 7 properties, enabling fine-grained control over who can communicate with whom, and how, within a Kubernetes cluster.
+Cilium [network policy][cnp] is a powerful and flexible way to enforce security rules and segment network traffic for containerized applications at the application and API protocol level using eBPF. It allows administrators to define both allow and deny rules based on Kubernetes labels, pod identities, and even Layer 7 properties, enabling fine-grained control over who can communicate with whom, and how, within a Kubernetes cluster.
 
 To demonstrate network policy, first create another client workload.
 
 ```sh
-$ kubectl apply -f - <<EOF
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -278,6 +294,7 @@ spec:
   containers:
   - name: curl-client
     image: curlimages/curl
+    imagePullPolicy: IfNotPresent
     command: ["/bin/sh"]
     args: ["-c", "while true; do sleep 1000; done"]
   nodeSelector:
@@ -381,12 +398,21 @@ for node in kind-control-plane kind-worker; do
 done
 ```
 
+You should receive the following output:
+
+```sh
+kind-control-plane gso_max_size:
+65536
+kind-worker gso_max_size:
+65536
+```
+
 The maximum size of the GSO is 64KB since BIG TCP is not enabled.
 
 Create a netperf client and server to establish a network throughput baseline:
 
 ```sh
-$ kubectl apply -f - <<EOF
+kubectl apply -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -394,7 +420,8 @@ metadata:
 spec:
   containers:
   - name: netperf
-    image: younglook/netperf-arm64
+    image: cilium/netperf
+    imagePullPolicy: IfNotPresent
     ports:
     - containerPort: 12865
   nodeSelector:
@@ -410,50 +437,56 @@ spec:
     args:
     - sleep
     - infinity
-    image: younglook/netperf-arm64
+    image: cilium/netperf
+    imagePullPolicy: IfNotPresent
   nodeSelector:
     kubernetes.io/hostname: kind-control-plane
 EOF
 ```
 
+__Note__: The image used in the above manifest is for x86 architectures. Replace with `younglook/netperf-arm64` to run on ARM 64-bit architectures.
+
 Get the IPs of the netperf client and server pods:
 
 ```sh
 $ kubectl get po -o wide
-NAME        READY   STATUS    RESTARTS   AGE    IP                    NODE                 NOMINATED NODE   READINESS GATES
-client      1/1     Running   0          17m    fd00:10:244::6321     kind-control-plane   <none>           <none>
-client2     1/1     Running   0          9m3s   fd00:10:244::cc9d     kind-control-plane   <none>           <none>
-np-client   1/1     Running   0          30s    fd00:10:244::349d     kind-control-plane   <none>           <none>
-np-server   1/1     Running   0          30s    fd00:10:244:1::35b7   kind-worker          <none>           <none>
-server      1/1     Running   0          17m    fd00:10:244:1::7c58   kind-worker          <none>           <none>
+NAME        READY   STATUS    RESTARTS   AGE   IP                    NODE                 NOMINATED NODE   READINESS GATES
+np-client   1/1     Running   0          31s   fd00:10:244::96       kind-control-plane   <none>           <none>
+np-server   1/1     Running   0          31s   fd00:10:244:1::35b7   kind-worker          <none>           <none>
+...
 ```
 
 Run a netperf test:
 
 ```sh
-$ kubectl exec np-client -- netperf  -t TCP_RR -H fd00:10:244:1::35d7 -- -r80000:80000 -O MIN_LATENCY,P90_LATENCY,P99_LATENCY,THROUGHPUT
+kubectl exec np-client -- netperf  -t TCP_RR -H fd00:10:244:1::35d7 -- -r80000:80000 -O MIN_LATENCY,P90_LATENCY,P99_LATENCY,THROUGHPUT
+```
+
+The test should complete with output similar to the following:
+
+```sh
 MIGRATED TCP REQUEST/RESPONSE TEST from ::0 (::) port 0 AF_INET6 to fd00:10:244:1::35d7 () port 0 AF_INET6 : first burst 0
 Minimum      90th         99th         Throughput
 Latency      Percentile   Percentile
 Microseconds Latency      Latency
              Microseconds Microseconds
-38           163          304          8682.26
+86           160          247          7515.80
 ```
 
 The netperf test results show performance metrics for a TCP request/response test between two pods across different nodes in your Kubernetes cluster. Here's the summary:
 
-* Minimum Latency: The shortest round-trip time (RTT) for a single request-response was 38 microseconds. This represents the best-case scenario.
+* Minimum Latency: The shortest round-trip time (RTT) for a single request-response was 86 microseconds. This represents the best-case scenario.
 
-* 90th Percentile Latency: 90% of the request-response interactions experienced a latency of 163 microseconds or less. This gives a sense of the typical upper-bound latency under normal conditions.
+* 90th Percentile Latency: 90% of the request-response interactions experienced a latency of 160 microseconds or less. This gives a sense of the typical upper-bound latency under normal conditions.
 
-* 99th Percentile Latency: 99% of the interactions were completed within 304 microseconds, indicating the near-worst-case latency observed during the test.
+* 99th Percentile Latency: 99% of the interactions were completed within 247 microseconds, indicating the near-worst-case latency observed during the test.
 
-* Throughput: The test achieved a throughput of 8682.26 transactions per second (TPS), reflecting the number of successful request-response cycles per second under the test conditions.
+* Throughput: The test achieved a throughput of 7515.80 transactions per second (TPS), reflecting the number of successful request-response cycles per second under the test conditions.
 
 Enable IPv6 BIG TCP:
 
 ```sh
-cilium config set enable-ipv4-big-tcp true
+cilium config set enable-ipv6-big-tcp true
 ```
 
 Wait for Cilium to report a "ready" status:
@@ -462,21 +495,11 @@ Wait for Cilium to report a "ready" status:
 cilium status --wait
 ```
 
-Verify the GSO setting of the nodes have increased to 192KB:
-
-```sh
-$ for node in kind-control-plane kind-worker; do   echo "$node gso_max_size:";   docker exec $node ip -d -j link show dev eth0 | jq -c '.[0].gso_max_size'; done
-kind-control-plane gso_max_size:
-196608
-kind-worker gso_max_size:
-196608
-```
-
 Pods need to be restarted for the BIG TCP setting to take effect. Forcefully delete the netperf pods:
 
 ```sh
-kubectl delete po/np-client -f
-kubectl delete po/np-server -f
+kubectl delete po/np-client --force
+kubectl delete po/np-server --force
 ```
 
 After using the above manifests to start new netperf client and server pods, get the new IP of the `np-server` pod:
@@ -487,10 +510,30 @@ NAME        READY   STATUS    RESTARTS   AGE     IP                    NODE     
 np-server   1/1     Running   0          3m21s   fd00:10:244:1::e32e   kind-worker   <none>           <none>
 ```
 
+Verify the GSO setting of the nodes have increased to 192KB:
+
+```sh
+for node in kind-control-plane kind-worker; do   echo "$node gso_max_size:";   docker exec $node ip -d -j link show dev eth0 | jq -c '.[0].gso_max_size'; done
+```
+
+You should receive the following output:
+
+```sh
+kind-control-plane gso_max_size:
+196608
+kind-worker gso_max_size:
+196608
+```
+
 Rerun the test:
 
 ```sh
-$ kubectl exec np-client -- netperf  -t TCP_RR -H fd00:10:244:1::e32e -- -r80000:80000 -O MIN_LATENCY,P90_LATENCY,P99_LATENCY,THROUGHPUT
+kubectl exec np-client -- netperf  -t TCP_RR -H fd00:10:244:1::e32e -- -r80000:80000 -O MIN_LATENCY,P90_LATENCY,P99_LATENCY,THROUGHPUT
+```
+
+Your results should be similar to the following output:
+
+```sh
 MIGRATED TCP REQUEST/RESPONSE TEST from ::0 (::) port 0 AF_INET6 to fd00:10:244:1::e32e () port 0 AF_INET6 : first burst 0
 Minimum      90th         99th         Throughput
 Latency      Percentile   Percentile
