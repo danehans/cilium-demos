@@ -5,6 +5,8 @@ Cilium is at the forefront of leveraging eBPF to provide advanced networking, ob
 The demo uses [Kind](https://kind.sigs.k8s.io/) to create a 2-node Kubernetes cluster configured for IPv6. The following diagram provides additional details of the demo environment:
 <img src="../../images/cilium-ipv6-demo.svg">
 
+A video recording of the demo is available [here](https://youtu.be/-S2aAYNspBk).
+
 ## Dependencies
 
 The following dependencies must be met for the demo to run properly:
